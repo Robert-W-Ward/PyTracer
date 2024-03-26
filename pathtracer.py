@@ -9,11 +9,28 @@ class Ray:
 class Material:
     def scatter(self, ray, hit_record):
         raise NotImplementedError
-class Light:
+class PointLight:
     def __init__(self, position, color,intensity):
         self.position = position
         self.color = color
         self.intensity = intensity
+class AreaLight:
+    def __init__(self, center, normal, up, width, height, color):
+        self.center = center  # Center of the light area
+        self.normal = normal  # Normal vector pointing out from the light surface
+        self.up = up  # 'Up' vector to define orientation
+        self.width = width
+        self.height = height
+        self.color = color  # Color (intensity) of the light
+        # Calculate the light's right and up vectors for area sampling
+        self.right = cp.cross(self.normal, self.up)
+        self.up = cp.cross(self.right, self.normal)  # Ensure orthogonality
+
+    def sample_point(self):
+        """Sample a random point on the area light's surface."""
+        u = cp.random.uniform(-0.5, 0.5)
+        v = cp.random.uniform(-0.5, 0.5)
+        return self.center + u * self.width * self.right + v * self.height * self.up
 
 class Lambertian(Material):
     def __init__(self, albedo):
@@ -160,9 +177,9 @@ def is_in_shadow(origin, direction, max_dist, world):
         if hit:
             return True
     return False
-def ray_color(ray, world, lights, depth):
+def ray_color(ray, world, point_lights,area_lights, depth):
     if depth <= 0:
-        return cp.zeros(3)  # No light if we've reached the recursion limit
+        return cp.zeros(3)  
     
     hit_record = None
     closest_so_far = cp.inf
@@ -174,7 +191,7 @@ def ray_color(ray, world, lights, depth):
 
     if hit_record:
         emitted_color = cp.zeros(3)
-        for light in lights:
+        for light in point_lights:
             to_light = light.position - hit_record[1]
             distance_to_light = cp.linalg.norm(to_light)
             to_light /= distance_to_light
@@ -183,21 +200,32 @@ def ray_color(ray, world, lights, depth):
                 continue
 
             cos_theta = max(cp.dot(hit_record[2], to_light), 0.0)
-            light_intensity = light.color / (distance_to_light ** 2)
             emitted_color += hit_record[4].albedo * light.intensity * cos_theta
+        for light in area_lights:
+            light_sample = light.sample_point()  # Sample a point on the area light
+            to_light = light_sample - hit_record[1]
+            distance_to_light = cp.linalg.norm(to_light)
+            to_light /= distance_to_light
 
+            if is_in_shadow(hit_record[1], to_light, distance_to_light, world):
+                continue
+
+            cos_theta = max(cp.dot(hit_record[2], to_light), 0.0)
+            light_intensity = light.color / (distance_to_light ** 2)
+            emitted_color += hit_record[4].albedo * light_intensity * cos_theta
         scattered, attenuation = hit_record[4].scatter(ray, hit_record)
-        return emitted_color + attenuation * ray_color(scattered, world, lights, depth - 1)
-
-    return cp.array([0.1, 0.1, 0.1])  # Background color or ambient light
-def render(world,lights, aspect_ratio, image_width, samples_per_pixel, max_depth):
+        if scattered is None:
+            return emitted_color
+        return emitted_color + attenuation * ray_color(scattered, world, point_lights,area_lights, depth - 1)
+    return cp.array([0.1, 0.1, 0.1])  
+def render(world,point_lights,area_lights, aspect_ratio, image_width, samples_per_pixel, max_depth):
     image_height = int(image_width / aspect_ratio)
 
     viewport_height = 2.0
     viewport_width = aspect_ratio * viewport_height
     focal_length = 1.0
 
-    origin = cp.zeros(3)
+    origin = cp.array([0,0,2])
     horizontal = cp.array([viewport_width, 0, 0])
     vertical = cp.array([0, viewport_height, 0])
     lower_left_corner = origin - horizontal / 2 - vertical / 2 - cp.array([0, 0, focal_length])
@@ -212,7 +240,7 @@ def render(world,lights, aspect_ratio, image_width, samples_per_pixel, max_depth
                 u = (i + cp.random.random()) / (image_width - 1)
                 v = (j + cp.random.random()) / (image_height - 1)
                 ray = Ray(origin, lower_left_corner + u * horizontal + v * vertical - origin)
-                color_sample = ray_color(ray, world,lights, max_depth)
+                color_sample = ray_color(ray, world,point_lights,area_lights, max_depth)
 
                 # Implement Russian Roulette here, with a better approach
                 if s > 3:  
@@ -228,9 +256,9 @@ def render(world,lights, aspect_ratio, image_width, samples_per_pixel, max_depth
 
 def main():
     aspect_ratio = 16.0 / 9.0
-    image_width = 150
+    image_width = 200
     samples_per_pixel = 64
-    max_depth = 3
+    max_depth = 10
 
     world = [
         Sphere(cp.asarray([0, 0, -1]), 0.5, Lambertian(cp.asarray([0.1, 0.2, 0.5]))),
@@ -238,16 +266,19 @@ def main():
         Sphere(cp.asarray([1, 0, -1]), 0.5, Metal(cp.asarray([0.8, 0.6, 0.2]), 0.3)),
         Sphere(cp.asarray([-1, 0, -1]), 0.5, Dielectric(cp.asarray([0.0,1.0,0.0]),1.5)),
     ]
-    lights = [
-        Light(cp.array([0, -3, 0]), cp.array([1, 1, 1]),5.0),  # White light above the scene
+    point_lights = [
+        PointLight(cp.array([0, -3, 0]), cp.array([1, 1, 1]),5.0),  # White light above the scene
+    ]
+    area_lights = [
+        AreaLight(cp.array([0, -2, 0]), cp.array([0, 1,0]), cp.array([0, 0, 1]), 2, 2, cp.array([5, 5, 5])),
     ]
 
 
     with Pool() as pool:
-        img = pool.apply(render, (world,lights, aspect_ratio, image_width, samples_per_pixel, max_depth))
+        img = pool.apply(render, (world,point_lights,area_lights, aspect_ratio, image_width, samples_per_pixel, max_depth))
 
     img = (cp.clip(img, 0, 1) * 255).astype(cp.uint8)
-    cv2.imwrite('image4.png',cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
+    cv2.imwrite('image5.png',cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
 
 if __name__ == "__main__":
     main()
